@@ -1,0 +1,20 @@
+names:
+- bicycle
+- bus
+- bus_stop
+- car
+- crosswalk
+- cyclist
+- mini_bus_taxi
+- motorcycle
+- pedestrian
+- road_sign
+- three_wheeler
+- traffic_light
+- traffic_sign
+- truck
+nc: 14
+path: C:\Users\adord\Desktop\addis_traffic_project\addis_traffic_split
+test: test/images
+train: train/images
+val: valid/images

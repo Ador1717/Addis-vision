@@ -1,0 +1,41 @@
+# Virtual environment
+venv/
+env/
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model training runs (large files)
+runs/
+
+# Dataset images and labels
+addis_traffic/train/
+addis_traffic/valid/
+addis_traffic/test/
+addis_traffic_split/
+test_images/
+
+# Trained model weights
+*.pt
+
+# Large zip/dataset files
+*.zip
+*.tar.gz
+
+# Node modules
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

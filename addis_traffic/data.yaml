@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 14
+names: ['bicycle', 'bus', 'bus_stop', 'car', 'crosswalk', 'cyclist', 'mini_bus_taxi', 'motorcycle', 'pedestrian', 'road_sign', 'three_wheeler', 'traffic_light', 'traffic_sign', 'truck']
+
+roboflow:
+  workspace: understanding-ai
+  project: understanding-ai
+  version: dataset
+  license: Private
+  url: https://app.roboflow.com/understanding-ai/understanding-ai/dataset
