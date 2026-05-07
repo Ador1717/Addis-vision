@@ -3,8 +3,9 @@ import { useAppStore } from "../store/appStore";
 import { Slider } from "./ui/Slider";
 
 const MODELS = [
-  { id: "yolov8x-seg", label: "YOLOv8x-seg", desc: "Highest accuracy" },
-  { id: "yolov8m-seg", label: "YOLOv8m-seg", desc: "Balanced speed" },
+  { id: "yolov8x-seg-v2", label: "YOLOv8x-seg v2 ✦", desc: "Best — mAP50 0.51 — 770 imgs" },
+  { id: "yolov8x-seg",    label: "YOLOv8x-seg v1",   desc: "mAP50 0.41 — 716 imgs" },
+  { id: "yolov8m-seg",    label: "YOLOv8m-seg v1",   desc: "Fastest — mAP50 0.42" },
 ];
 
 const SIZES = [320, 480, 640, 1280];

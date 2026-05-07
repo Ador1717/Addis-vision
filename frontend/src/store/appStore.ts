@@ -36,7 +36,7 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  model: "yolov8x-seg",
+  model: "yolov8x-seg-v2",
   conf: 0.25,
   iou: 0.45,
   imgsz: 640,

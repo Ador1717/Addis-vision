@@ -1,0 +1,23 @@
+path: C:/Users/adord/Desktop/Traffic-YOLO-Training/dataset
+
+train: images/train
+val:   images/val
+test:  images/test
+
+nc: 14
+
+names:
+  0: bicycle
+  1: bus
+  2: bus_stop
+  3: car
+  4: crosswalk
+  5: cyclist
+  6: mini_bus_taxi
+  7: motorcycle
+  8: pedestrian
+  9: road_sign
+  10: three_wheeler
+  11: traffic_light
+  12: traffic_sign
+  13: truck
