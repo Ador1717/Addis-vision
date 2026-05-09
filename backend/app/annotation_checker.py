@@ -1,9 +1,11 @@
 """
 Annotation Quality Checker — Core Logic
-Parses YOLO .txt annotations, runs YOLOv8 inference independently,
-performs greedy IoU matching, and produces a CVAT-style quality report.
+Supports both YOLO .txt and COCO JSON annotation formats.
+Runs YOLOv8 inference independently, performs greedy IoU matching,
+and produces a CVAT-style quality report.
 """
 import base64
+import json
 import time
 from typing import Optional
 
@@ -14,45 +16,54 @@ from app.config import CLASS_NAMES, settings
 from app.model_manager import model_manager
 
 
-# ── Pair colours (one per matched object pair) ────────────────────────────────
-PAIR_COLORS_BGR = [
-    (0, 105, 255), (0, 200, 80), (0, 200, 200), (200, 80, 0),
-    (200, 0, 200), (0, 165, 255), (255, 200, 0), (180, 0, 180),
-    (0, 255, 180), (255, 80, 80), (80, 255, 80), (80, 80, 255),
-    (255, 180, 0), (0, 80, 255),
-]
-
+# ── Verdict colours (BGR for OpenCV) ─────────────────────────────────────────
 VERDICT_BGR = {
-    "pass":    (0, 200, 80),    # green
-    "warning": (0, 165, 255),   # orange
-    "error":   (0, 60, 220),    # red
+    "pass":    (0, 200, 80),
+    "warning": (0, 165, 255),
+    "error":   (0, 60, 220),
 }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _hex_to_bgr(h: str) -> tuple:
-    h = h.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return (b, g, r)
-
 
 def _encode_image(img_bgr: np.ndarray) -> str:
     _, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     return base64.b64encode(buf).decode()
 
 
-def _put_label(img, text, x1, y1, color_bgr):
+def _put_label(img: np.ndarray, text: str, x1: int, y1: int, color: tuple):
     (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-    cv2.rectangle(img, (x1, max(0, y1 - th - 6)), (x1 + tw + 4, y1), color_bgr, -1)
+    top = max(0, y1 - th - 6)
+    cv2.rectangle(img, (x1, top), (x1 + tw + 4, y1), color, -1)
     cv2.putText(img, text, (x1 + 2, max(th, y1 - 3)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-# ── Parsing ───────────────────────────────────────────────────────────────────
+def _draw_panel_header(img: np.ndarray, text: str, color: tuple):
+    cv2.rectangle(img, (0, 0), (img.shape[1], 30), (20, 20, 20), -1)
+    cv2.putText(img, text, (10, 21),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 1, cv2.LINE_AA)
+
+
+# ── Format detection ──────────────────────────────────────────────────────────
+
+def detect_annotation_format(content: str) -> str:
+    """Return 'coco' if content is valid COCO JSON, else 'yolo'."""
+    stripped = content.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+            if "annotations" in data and "categories" in data:
+                return "coco"
+        except Exception:
+            pass
+    return "yolo"
+
+
+# ── YOLO parser ───────────────────────────────────────────────────────────────
 
 def parse_yolo_annotation(txt: str, img_w: int, img_h: int) -> list[dict]:
-    """YOLO .txt  →  list of pixel-coord boxes."""
+    """YOLO .txt → list of pixel-coord boxes using our 14-class names."""
     boxes = []
     for line in txt.strip().splitlines():
         parts = line.strip().split()
@@ -64,10 +75,122 @@ def parse_yolo_annotation(txt: str, img_w: int, img_h: int) -> list[dict]:
         y1 = max(0.0, (cy - bh / 2) * img_h)
         x2 = min(float(img_w), (cx + bw / 2) * img_w)
         y2 = min(float(img_h), (cy + bh / 2) * img_h)
-        cls_name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) else str(cls_id)
-        boxes.append({"class_id": cls_id, "class_name": cls_name,
-                      "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        cls_name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) else f"class_{cls_id}"
+        boxes.append({
+            "class_id": cls_id,
+            "class_name": cls_name,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "source_format": "yolo",
+        })
     return boxes
+
+
+# ── COCO parser ───────────────────────────────────────────────────────────────
+
+def parse_coco_annotation(
+    json_str: str,
+    image_filename: str,
+    img_w: int,
+    img_h: int,
+) -> list[dict]:
+    """
+    COCO JSON → list of pixel-coord boxes for the specified image.
+
+    Handles both:
+      - Single-image COCO exports (one image in 'images')
+      - Multi-image COCO exports (matches by filename)
+
+    Class names come from the COCO 'categories' list, so any custom
+    label set works — not just our 14-class model list.
+    """
+    data = json.loads(json_str)
+
+    # Build category id → name map from the JSON itself
+    cat_map: dict[int, str] = {
+        c["id"]: c["name"] for c in data.get("categories", [])
+    }
+
+    # Find the image record — match by filename (basename) or fall back to first
+    images = data.get("images", [])
+    target_img = None
+    img_basename = image_filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+    for img in images:
+        fname = img.get("file_name", "")
+        if fname == img_basename or fname.endswith("/" + img_basename) or fname.endswith("\\" + img_basename):
+            target_img = img
+            break
+
+    if target_img is None and len(images) == 1:
+        # Single-image COCO export — use the only image regardless of name
+        target_img = images[0]
+
+    if target_img is None:
+        raise ValueError(
+            f"Image '{image_filename}' not found in COCO JSON. "
+            f"Available: {[i.get('file_name') for i in images[:5]]}"
+        )
+
+    image_id = target_img["id"]
+    # Use dimensions from JSON if available, otherwise use actual image dims
+    json_w = target_img.get("width", img_w)
+    json_h = target_img.get("height", img_h)
+
+    boxes = []
+    for ann in data.get("annotations", []):
+        if ann.get("image_id") != image_id:
+            continue
+        bbox = ann.get("bbox")  # COCO: [x_min, y_min, width, height] in pixels
+        if not bbox or len(bbox) < 4:
+            continue
+        cat_id = ann.get("category_id", 0)
+        cls_name = cat_map.get(cat_id, f"class_{cat_id}")
+        x1 = max(0.0, float(bbox[0]))
+        y1 = max(0.0, float(bbox[1]))
+        x2 = min(float(json_w), x1 + float(bbox[2]))
+        y2 = min(float(json_h), y1 + float(bbox[3]))
+        boxes.append({
+            "class_id": cat_id,
+            "class_name": cls_name,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "source_format": "coco",
+        })
+    return boxes
+
+
+def parse_coco_all_images(json_str: str) -> dict[str, list[dict]]:
+    """
+    Parse a multi-image COCO JSON → {filename: [boxes]} map.
+    Used when a single COCO JSON covers a whole dataset split.
+    """
+    data = json.loads(json_str)
+    cat_map: dict[int, str] = {c["id"]: c["name"] for c in data.get("categories", [])}
+    id_to_img: dict[int, dict] = {img["id"]: img for img in data.get("images", [])}
+
+    result: dict[str, list[dict]] = {img["file_name"]: [] for img in data.get("images", [])}
+
+    for ann in data.get("annotations", []):
+        img = id_to_img.get(ann.get("image_id"))
+        if img is None:
+            continue
+        bbox = ann.get("bbox")
+        if not bbox or len(bbox) < 4:
+            continue
+        cat_id = ann.get("category_id", 0)
+        cls_name = cat_map.get(cat_id, f"class_{cat_id}")
+        w = img.get("width", 640)
+        h = img.get("height", 480)
+        x1 = max(0.0, float(bbox[0]))
+        y1 = max(0.0, float(bbox[1]))
+        x2 = min(float(w), x1 + float(bbox[2]))
+        y2 = min(float(h), y1 + float(bbox[3]))
+        result[img["file_name"]].append({
+            "class_id": cat_id,
+            "class_name": cls_name,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "source_format": "coco",
+        })
+    return result
 
 
 # ── IoU ───────────────────────────────────────────────────────────────────────
@@ -100,12 +223,6 @@ def classify_conflict(iou: float, class_match: bool) -> tuple[Optional[str], str
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
 
-def _draw_panel_header(img: np.ndarray, text: str, color: tuple):
-    cv2.rectangle(img, (0, 0), (img.shape[1], 30), (20, 20, 20), -1)
-    cv2.putText(img, text, (10, 21),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 1, cv2.LINE_AA)
-
-
 def _draw_human_panel(img: np.ndarray, objects: list) -> np.ndarray:
     out = img.copy()
     for obj in objects:
@@ -113,28 +230,20 @@ def _draw_human_panel(img: np.ndarray, objects: list) -> np.ndarray:
         color = VERDICT_BGR.get(obj["verdict"], (128, 128, 128))
         x1, y1, x2, y2 = int(hb["x1"]), int(hb["y1"]), int(hb["x2"]), int(hb["y2"])
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-
-        iou_str = f"IoU:{obj['iou']:.2f}"
-        lbl = f"{obj['human_class']} {iou_str}"
-        _put_label(out, lbl, x1, y1, color)
-
+        _put_label(out, f"{obj['human_class']} IoU:{obj['iou']:.2f}", x1, y1, color)
         if obj["model_box"] is None:
             tag = "NOT DETECTED"
             (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-            mx = (x1 + x2) // 2 - tw // 2
-            my = (y1 + y2) // 2
+            mx, my = (x1 + x2) // 2 - tw // 2, (y1 + y2) // 2
             cv2.rectangle(out, (mx - 2, my - th - 2), (mx + tw + 2, my + 4), (0, 40, 180), -1)
             cv2.putText(out, tag, (mx, my), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
-
     _draw_panel_header(out, "HUMAN ANNOTATION", (100, 180, 255))
     return out
 
 
-def _draw_model_panel(img: np.ndarray, model_boxes: list, matched_set: set,
-                      obj_results: list) -> np.ndarray:
+def _draw_model_panel(img: np.ndarray, model_boxes: list,
+                      matched_set: set, obj_results: list) -> np.ndarray:
     out = img.copy()
-
-    # build model_idx -> obj map
     m_to_obj: dict[int, dict] = {}
     for obj in obj_results:
         if obj.get("model_idx") is not None:
@@ -142,56 +251,28 @@ def _draw_model_panel(img: np.ndarray, model_boxes: list, matched_set: set,
 
     for mi, mb in enumerate(model_boxes):
         x1, y1, x2, y2 = int(mb["x1"]), int(mb["y1"]), int(mb["x2"]), int(mb["y2"])
-        if mi in matched_set:
-            obj = m_to_obj.get(mi)
-            color = VERDICT_BGR.get(obj["verdict"], (0, 200, 80)) if obj else (0, 200, 80)
-        else:
-            color = (0, 140, 255)   # orange — not labelled by human
-
+        color = (VERDICT_BGR.get(m_to_obj[mi]["verdict"], (0, 200, 80))
+                 if mi in matched_set else (0, 140, 255))
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-        lbl = f"{mb['class_name']} {mb['confidence']:.2f}"
-        _put_label(out, lbl, x1, y1, color)
-
+        _put_label(out, f"{mb['class_name']} {mb['confidence']:.2f}", x1, y1, color)
         if mi not in matched_set:
             tag = "NOT LABELLED"
             (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-            mx = (x1 + x2) // 2 - tw // 2
-            my = (y1 + y2) // 2
+            mx, my = (x1 + x2) // 2 - tw // 2, (y1 + y2) // 2
             cv2.rectangle(out, (mx - 2, my - th - 2), (mx + tw + 2, my + 4), (0, 100, 200), -1)
             cv2.putText(out, tag, (mx, my), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
-
     _draw_panel_header(out, "MODEL PREDICTION", (80, 220, 80))
     return out
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Core matching + scoring ───────────────────────────────────────────────────
 
-def run_annotation_check(
-    image_bytes: bytes,
-    annotation_txt: str,
-    model_key: str = settings.default_model,
-    conf_threshold: float = 0.4,
-    iou_threshold: float = 0.5,
-) -> dict:
-    """
-    Full annotation quality check.
-    Returns a structured dict with quality score, per-object breakdown,
-    and base64-encoded side-by-side panel images.
-    """
-    # Decode image
-    np_arr = np.frombuffer(image_bytes, np.uint8)
-    img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    if img_bgr is None:
-        raise ValueError("Could not decode image — unsupported format.")
+def _match_and_score(img_bgr: np.ndarray, human_boxes: list[dict],
+                     model_key: str, conf_threshold: float) -> dict:
+    """Run inference + IoU matching + scoring. Returns full result dict."""
     img_h, img_w = img_bgr.shape[:2]
-
-    # Parse human annotation
-    human_boxes = parse_yolo_annotation(annotation_txt, img_w, img_h)
-    if not human_boxes:
-        raise ValueError("Annotation file is empty or invalid YOLO format.")
-
-    # Run model inference independently
     model = model_manager.get(model_key)
+
     t0 = time.perf_counter()
     results = model.predict(
         source=img_bgr, imgsz=640,
@@ -205,7 +286,7 @@ def run_annotation_check(
     if result.boxes is not None:
         for box in result.boxes:
             cls_id = int(box.cls[0])
-            cls_name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) else str(cls_id)
+            cls_name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) else f"class_{cls_id}"
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             model_boxes.append({
                 "class_id": cls_id, "class_name": cls_name,
@@ -229,7 +310,8 @@ def run_annotation_check(
         if best_iou >= 0.1 and best_m_idx >= 0:
             used_model.add(best_m_idx)
             mbox = model_boxes[best_m_idx]
-            class_match = hbox["class_name"] == mbox["class_name"]
+            # For COCO annotations, compare using the COCO class name directly
+            class_match = hbox["class_name"].lower() == mbox["class_name"].lower()
             conflict, verdict = classify_conflict(best_iou, class_match)
             obj_results.append({
                 "id": h_idx,
@@ -244,48 +326,39 @@ def run_annotation_check(
                 "model_idx": best_m_idx,
             })
         else:
-            conflict, verdict = classify_conflict(0.0, False)
             obj_results.append({
                 "id": h_idx,
                 "human_class": hbox["class_name"],
                 "model_class": None,
                 "model_confidence": None,
                 "iou": 0.0,
-                "conflict": conflict,
-                "verdict": verdict,
+                "conflict": "missing_annotation",
+                "verdict": "error",
                 "human_box": hbox,
                 "model_box": None,
                 "model_idx": None,
             })
 
-    # Unmatched model predictions (human missed)
     unmatched_model = [
-        {
-            "model_class": model_boxes[i]["class_name"],
-            "confidence": round(model_boxes[i]["confidence"], 3),
-            "model_box": model_boxes[i],
-            "note": "not labelled by human",
-        }
+        {"model_class": model_boxes[i]["class_name"],
+         "confidence": round(model_boxes[i]["confidence"], 3),
+         "note": "not labelled by human"}
         for i in range(len(model_boxes)) if i not in used_model
     ]
 
-    # Metrics
-    passed  = sum(1 for o in obj_results if o["verdict"] == "pass")
-    errors  = sum(1 for o in obj_results if o["verdict"] == "error")
+    passed   = sum(1 for o in obj_results if o["verdict"] == "pass")
+    errors   = sum(1 for o in obj_results if o["verdict"] == "error")
     warnings = sum(1 for o in obj_results if o["verdict"] == "warning")
     total_human = len(human_boxes)
     quality_score = round(passed / total_human * 100, 1) if total_human > 0 else 0.0
     ious = [o["iou"] for o in obj_results if o["iou"] > 0]
     frame_intersection = round(float(np.mean(ious)), 3) if ious else 0.0
 
-    # Draw panels
     human_panel = _draw_human_panel(img_bgr, obj_results)
     model_panel = _draw_model_panel(img_bgr, model_boxes, used_model, obj_results)
 
-    # Serialise (remove numpy objects from boxes before returning)
-    def _clean(obj: dict) -> dict:
-        out = {k: v for k, v in obj.items() if k not in ("human_box", "model_box", "model_idx")}
-        return out
+    def _clean(o: dict) -> dict:
+        return {k: v for k, v in o.items() if k not in ("human_box", "model_box", "model_idx")}
 
     return {
         "quality_score": quality_score,
@@ -298,10 +371,45 @@ def run_annotation_check(
         "total_conflicts": errors + warnings,
         "inference_time_ms": round(inference_ms, 1),
         "objects": [_clean(o) for o in obj_results],
-        "unmatched_model_predictions": [
-            {k: v for k, v in u.items() if k != "model_box"}
-            for u in unmatched_model
-        ],
+        "unmatched_model_predictions": unmatched_model,
         "human_image": _encode_image(human_panel),
         "model_image": _encode_image(model_panel),
     }
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def run_annotation_check(
+    image_bytes: bytes,
+    annotation_content: str,
+    image_filename: str = "image.jpg",
+    model_key: str = settings.default_model,
+    conf_threshold: float = 0.4,
+    iou_threshold: float = 0.5,
+) -> dict:
+    """
+    Auto-detects YOLO or COCO format, parses annotation, runs quality check.
+    Returns full result dict including rendered panels as base64 JPEGs.
+    """
+    np_arr = np.frombuffer(image_bytes, np.uint8)
+    img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise ValueError("Could not decode image — unsupported format.")
+    img_h, img_w = img_bgr.shape[:2]
+
+    fmt = detect_annotation_format(annotation_content)
+
+    if fmt == "coco":
+        human_boxes = parse_coco_annotation(annotation_content, image_filename, img_w, img_h)
+    else:
+        human_boxes = parse_yolo_annotation(annotation_content, img_w, img_h)
+
+    if not human_boxes:
+        raise ValueError(
+            f"No annotations found for this image in the {fmt.upper()} file. "
+            "Check that the filename matches or the file is not empty."
+        )
+
+    result = _match_and_score(img_bgr, human_boxes, model_key, conf_threshold)
+    result["annotation_format"] = fmt.upper()
+    return result

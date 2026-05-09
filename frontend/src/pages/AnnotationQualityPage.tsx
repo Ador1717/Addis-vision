@@ -43,32 +43,69 @@ const qualityRing = (score: number) =>
 
 interface FilePair { image: File; annotation: File }
 
+function formatBadge(files: File[]) {
+  if (files.length === 0) return null;
+  const isCoco = files.some((f) => f.name.toLowerCase().endsWith(".json"));
+  const isYolo = files.some((f) => f.name.toLowerCase().endsWith(".txt"));
+  if (isCoco && isYolo) return <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 font-medium">MIXED</span>;
+  if (isCoco) return <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-medium">COCO JSON</span>;
+  return <span className="text-xs px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-400 font-medium">YOLO TXT</span>;
+}
+
 function PairDropzone({ onAdd }: { onAdd: (pairs: FilePair[]) => void }) {
-  const [imgFiles, setImgFiles] = useState<File[]>([]);
-  const [txtFiles, setTxtFiles] = useState<File[]>([]);
+  const [imgFiles, setImgFiles]  = useState<File[]>([]);
+  const [annFiles, setAnnFiles]  = useState<File[]>([]);
 
   const onDropImg = useCallback((accepted: File[]) => setImgFiles((p) => [...p, ...accepted]), []);
-  const onDropTxt = useCallback((accepted: File[]) => setTxtFiles((p) => [...p, ...accepted]), []);
+  const onDropAnn = useCallback((accepted: File[]) => setAnnFiles((p) => [...p, ...accepted]), []);
 
   const { getRootProps: getRootImg, getInputProps: getInputImg, isDragActive: isDragImg } =
     useDropzone({ onDrop: onDropImg, accept: { "image/*": [".jpg", ".jpeg", ".png"] }, multiple: true });
-  const { getRootProps: getRootTxt, getInputProps: getInputTxt, isDragActive: isDragTxt } =
-    useDropzone({ onDrop: onDropTxt, accept: { "text/plain": [".txt"] }, multiple: true });
 
-  const ready = imgFiles.length > 0 && txtFiles.length > 0 && imgFiles.length === txtFiles.length;
+  const { getRootProps: getRootAnn, getInputProps: getInputAnn, isDragActive: isDragAnn } =
+    useDropzone({
+      onDrop: onDropAnn,
+      accept: { "text/plain": [".txt"], "application/json": [".json"], "": [".txt", ".json"] },
+      multiple: true,
+    });
+
+  // Allow: N images + N annotations  OR  N images + 1 shared COCO JSON
+  const isSharedCoco = annFiles.length === 1 && annFiles[0].name.toLowerCase().endsWith(".json") && imgFiles.length > 1;
+  const ready = imgFiles.length > 0 && annFiles.length > 0 &&
+    (imgFiles.length === annFiles.length || isSharedCoco);
 
   function handleAdd() {
-    // Sort both by name then zip
-    const imgs = [...imgFiles].sort((a, b) => a.name.localeCompare(b.name));
-    const txts = [...txtFiles].sort((a, b) => a.name.localeCompare(b.name));
-    const pairs = imgs.map((img, i) => ({ image: img, annotation: txts[i] }));
-    onAdd(pairs);
+    if (isSharedCoco) {
+      // N images, 1 shared COCO JSON → send as batch with repeated annotation
+      const pairs = imgFiles.map((img) => ({ image: img, annotation: annFiles[0] }));
+      onAdd(pairs);
+    } else {
+      const imgs = [...imgFiles].sort((a, b) => a.name.localeCompare(b.name));
+      const anns = [...annFiles].sort((a, b) => a.name.localeCompare(b.name));
+      onAdd(imgs.map((img, i) => ({ image: img, annotation: anns[i] })));
+    }
     setImgFiles([]);
-    setTxtFiles([]);
+    setAnnFiles([]);
   }
+
+  const mismatch = imgFiles.length > 0 && annFiles.length > 0 &&
+    imgFiles.length !== annFiles.length && !isSharedCoco;
 
   return (
     <div className="space-y-4">
+      {/* Format info banner */}
+      <div className="flex items-center gap-3 text-xs text-slate-500 bg-surface-700/40 rounded-xl px-4 py-2.5">
+        <span className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-brand-400" />
+          <strong className="text-slate-300">YOLO</strong> — one <code className="text-brand-400">.txt</code> per image
+        </span>
+        <span className="text-slate-600">|</span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-amber-400" />
+          <strong className="text-slate-300">COCO</strong> — one <code className="text-amber-400">.json</code> per image <em>or</em> shared across all images
+        </span>
+      </div>
+
       <div className="grid grid-cols-2 gap-4">
         {/* Image drop */}
         <div
@@ -82,30 +119,40 @@ function PairDropzone({ onAdd }: { onAdd: (pairs: FilePair[]) => void }) {
           <p className="text-sm font-medium text-slate-300">Drop images here</p>
           <p className="text-xs text-slate-500 mt-1">JPG, PNG — multiple ok</p>
           {imgFiles.length > 0 && (
-            <p className="mt-2 text-xs text-brand-400 font-medium">{imgFiles.length} image(s) selected</p>
+            <p className="mt-2 text-xs text-brand-400 font-medium">{imgFiles.length} image(s) ready</p>
           )}
         </div>
 
-        {/* Annotation drop */}
+        {/* Annotation drop — accepts .txt AND .json */}
         <div
-          {...getRootTxt()}
+          {...getRootAnn()}
           className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
-            isDragTxt ? "border-brand-400 bg-brand-400/10" : "border-surface-600 hover:border-surface-500"
+            isDragAnn ? "border-amber-400 bg-amber-400/10" : "border-surface-600 hover:border-surface-500"
           }`}
         >
-          <input {...getInputTxt()} />
+          <input {...getInputAnn()} />
           <FileText size={28} className="mx-auto mb-2 text-slate-500" />
-          <p className="text-sm font-medium text-slate-300">Drop .txt annotations</p>
-          <p className="text-xs text-slate-500 mt-1">YOLO format — one per image</p>
-          {txtFiles.length > 0 && (
-            <p className="mt-2 text-xs text-brand-400 font-medium">{txtFiles.length} file(s) selected</p>
+          <p className="text-sm font-medium text-slate-300">Drop annotations here</p>
+          <p className="text-xs text-slate-500 mt-1">
+            <span className="text-brand-400">.txt</span> YOLO &nbsp;or&nbsp;
+            <span className="text-amber-400">.json</span> COCO
+          </p>
+          {annFiles.length > 0 && (
+            <div className="mt-2 flex items-center justify-center gap-2">
+              <p className="text-xs text-slate-300 font-medium">{annFiles.length} file(s)</p>
+              {formatBadge(annFiles)}
+            </div>
+          )}
+          {isSharedCoco && (
+            <p className="mt-1 text-xs text-amber-400">Shared across all images ✓</p>
           )}
         </div>
       </div>
 
-      {imgFiles.length > 0 && txtFiles.length > 0 && imgFiles.length !== txtFiles.length && (
-        <p className="text-xs text-amber-400 text-center">
-          ⚠ Mismatch: {imgFiles.length} images vs {txtFiles.length} annotations — counts must match
+      {mismatch && (
+        <p className="text-xs text-amber-400 text-center bg-amber-400/10 rounded-lg py-2">
+          ⚠ {imgFiles.length} images vs {annFiles.length} annotation files — counts must match
+          (or upload 1 COCO JSON to share across all images)
         </p>
       )}
 
@@ -116,6 +163,7 @@ function PairDropzone({ onAdd }: { onAdd: (pairs: FilePair[]) => void }) {
       >
         <Upload size={16} />
         Check {imgFiles.length > 1 ? `${imgFiles.length} images` : "image"}
+        {annFiles.length > 0 && <>{" · "}{formatBadge(annFiles)}</>}
       </button>
     </div>
   );
@@ -169,7 +217,18 @@ function SingleResult({
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-bold text-white">{result.image_name}</h2>
-          <p className="text-xs text-slate-500">{result.inference_time_ms.toFixed(0)} ms inference</p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <p className="text-xs text-slate-500">{result.inference_time_ms.toFixed(0)} ms inference</p>
+            {(result as any).annotation_format && (
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                (result as any).annotation_format === "COCO"
+                  ? "bg-amber-500/20 text-amber-400"
+                  : "bg-brand-500/20 text-brand-400"
+              }`}>
+                {(result as any).annotation_format}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex gap-2">
           <button onClick={downloadJSON}
