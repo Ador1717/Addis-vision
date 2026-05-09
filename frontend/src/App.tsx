@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { Activity, Film, ImageIcon, LayoutDashboard, Menu, X, Zap } from "lucide-react";
+import { Film, ImageIcon, Menu, ScanSearch, X, Zap } from "lucide-react";
 import { ImageDetectPage } from "./pages/ImageDetectPage";
 import { VideoDetectPage } from "./pages/VideoDetectPage";
+import { AnnotationQualityPage } from "./pages/AnnotationQualityPage";
 import clsx from "clsx";
 
 const NAV = [
-  { id: "image",  label: "Image Detection", icon: ImageIcon },
-  { id: "video",  label: "Video Analysis",  icon: Film },
+  { id: "image",      label: "Image Detection",     icon: ImageIcon },
+  { id: "video",      label: "Video Analysis",       icon: Film },
+  { id: "annotation", label: "Annotation Quality",   icon: ScanSearch },
 ];
 
 const CLASS_COLORS: Record<string, string> = {
@@ -98,17 +100,22 @@ export default function App() {
         <main className="flex-1 p-4 lg:p-6 overflow-auto">
           <div className="mb-6">
             <h1 className="text-xl font-bold text-white">
-              {page === "image" ? "Image Detection" : "Video Analysis"}
+              {page === "image"      ? "Image Detection"
+               : page === "video"   ? "Video Analysis"
+               :                      "Annotation Quality Checker"}
             </h1>
             <p className="text-sm text-slate-500 mt-0.5">
               {page === "image"
                 ? "Upload an image to detect and segment traffic objects"
-                : "Upload a video to analyse traffic frame by frame"}
+                : page === "video"
+                ? "Upload a video to analyse traffic frame by frame"
+                : "Upload an image + YOLO .txt file to assess annotation quality"}
             </p>
           </div>
 
-          {page === "image" && <ImageDetectPage />}
-          {page === "video" && <VideoDetectPage />}
+          {page === "image"      && <ImageDetectPage />}
+          {page === "video"      && <VideoDetectPage />}
+          {page === "annotation" && <AnnotationQualityPage />}
         </main>
 
         {/* Right sidebar — class legend */}
